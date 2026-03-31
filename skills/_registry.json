@@ -1,0 +1,26 @@
+[
+  {
+    "name": "docx_writing",
+    "description": "Expert python-docx knowledge: API, typography, formatting, and document generation for any .docx output"
+  },
+  {
+    "name": "web_search",
+    "description": "Multi-step research methodology: query formulation, source evaluation, synthesis for any research task"
+  },
+  {
+    "name": "html_css",
+    "description": "Modern HTML/CSS design principles: layout, typography, color, responsiveness for any rendered artifact"
+  },
+  {
+    "name": "code_generation",
+    "description": "Clean code principles: structure, naming, error handling, and language-specific best practices for any programming task"
+  },
+  {
+    "name": "data_analysis",
+    "description": "Data analysis methodology: pandas, matplotlib, statistics, and result presentation for any dataset or data question"
+  },
+  {
+    "name": "presentation",
+    "description": "Slide design and narrative structure: storytelling, visual hierarchy, and HTML slide decks for any presentation"
+  }
+]
