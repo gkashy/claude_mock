@@ -1,0 +1,19 @@
+networkx>=3.0
+graphify @ git+https://github.com/safishamsi/graphify.git@v3
+numpy>=1.26.0
+
+[all]
+ekglmm[anthropic,openai,postgres,qdrant]
+
+[anthropic]
+anthropic>=0.42.0
+
+[openai]
+openai>=1.60.0
+
+[postgres]
+sqlalchemy[asyncio]>=2.0.0
+asyncpg>=0.30.0
+
+[qdrant]
+qdrant-client>=1.12.0
