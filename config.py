@@ -19,6 +19,11 @@ class Settings:
     MEMORY_TOP_K: int = int(os.getenv("MEMORY_TOP_K", "15"))
     MEMORY_TOKEN_BUDGET: int = int(os.getenv("MEMORY_TOKEN_BUDGET", "2000"))
 
+    USER_NAME: str = os.getenv("USER_NAME", "Gaurav Kashyap")
+
+    GRAPH_NEIGHBOR_DEPTH: int = int(os.getenv("GRAPH_NEIGHBOR_DEPTH", "1"))
+    GRAPH_CONTEXT_BUDGET: int = int(os.getenv("GRAPH_CONTEXT_BUDGET", "500"))  # tokens reserved for graph lines
+
     MAX_ITERATIONS: int = int(os.getenv("MAX_ITERATIONS", "10"))
 
     DATA_DIR: Path = Path(os.getenv("DATA_DIR", "data"))

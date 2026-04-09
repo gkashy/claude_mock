@@ -55,7 +55,14 @@ def _build_system_prompt(
     else:
         artifacts_block = "(No artifacts in this session yet.)"
 
-    prompt = _system_prompt_template.replace("{{MEMORY_FACTS}}", facts_block)
+    from config import settings as _settings
+    if _settings.USER_NAME:
+        identity_block = f"You are speaking with **{_settings.USER_NAME}**. Always use this exact name when referring to the user in memory, facts, or knowledge graph operations."
+    else:
+        identity_block = ""
+
+    prompt = _system_prompt_template.replace("{{USER_IDENTITY}}", identity_block)
+    prompt = prompt.replace("{{MEMORY_FACTS}}", facts_block)
     prompt = prompt.replace("{{SESSION_ARTIFACTS}}", artifacts_block)
     return prompt
 
@@ -249,7 +256,7 @@ async def run_turn(
                 tool_result_msg = provider.format_tool_result(tc.id, result)
                 messages.append(tool_result_msg)
 
-                if tc.name in ("create_artifact", "update_artifact"):
+                if tc.name in ("create_artifact", "update_artifact", "get_artifact_content"):
                     from tools.artifacts import get_last_artifact, clear_last_artifact
                     artifact = get_last_artifact()
                     if artifact:

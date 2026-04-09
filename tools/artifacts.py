@@ -28,7 +28,54 @@ def clear_last_artifact() -> None:
 # create_artifact
 # ---------------------------------------------------------------------------
 
+async def _register_artifact_in_graph(
+    art: dict,
+    session_id: str,
+    user_id: str,
+) -> None:
+    """Add an artifact as a node in the knowledge graph with an edge from its creator."""
+    import knowledge_graph as kg
+
+    artifact_name = art.get("title", "Untitled Artifact")
+    artifact_id = art.get("id", "")
+
+    # Resolve the real person name rather than using a generic "user" label.
+    # Falls back to user_id if no person entity has been established yet.
+    creator_name = kg.get_primary_person_name(user_id) or user_id
+
+    await kg.add_triple(
+        subject=creator_name,
+        subject_type="person",
+        relation="created",
+        obj=artifact_name,
+        object_type="project",
+        user_id=user_id,
+        source_session_id=session_id,
+        properties={"artifact_id": artifact_id, "filename": art.get("filename", "")},
+    )
+
+
 TOOL_DEFINITIONS = [
+    {
+        "name": "find_artifact",
+        "description": (
+            "Search for artifacts created in ANY past session by keyword. "
+            "Use this when the user asks to see, pull up, or reference something "
+            "created before (a presentation, document, code file, etc.) that isn't "
+            "in the current session. Returns artifact metadata and IDs that can be "
+            "loaded with get_artifact_content."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Keywords to search for in artifact titles (e.g. 'watchlist', 'presentation', 'resume').",
+                },
+            },
+            "required": ["query"],
+        },
+    },
     {
         "name": "get_artifact_content",
         "description": (
@@ -138,13 +185,33 @@ TOOL_DEFINITIONS = [
 ]
 
 
+async def find_artifact(query: str) -> str:
+    """Search for artifacts across all sessions by title keyword."""
+    user_id = get_user_id()
+    results = await memory.search_artifacts(user_id, query)
+    if not results:
+        return f"No artifacts found matching: {query}"
+    lines = []
+    for r in results:
+        lines.append(
+            f"[id: {r['id']}] \"{r['title']}\" ({r['filename']}) "
+            f"-- v{r['current_version']}, {r['content_type']}, "
+            f"session: {r['session_id']}"
+        )
+    return "\n".join(lines)
+
+
 async def get_artifact_content(
     artifact_id: str,
     version: int | None = None,
 ) -> str:
+    global _last_artifact
+
     loaded = await memory.get_artifact(artifact_id, version=version)
     if not loaded:
         return f"Error: artifact '{artifact_id}' not found."
+
+    _last_artifact = loaded
 
     ver_label = f"v{loaded['version']}/{loaded['total_versions']}"
     header = (
@@ -176,6 +243,12 @@ async def create_artifact(
         language=language,
     )
     _last_artifact = art
+
+    try:
+        await _register_artifact_in_graph(art, session_id, user_id)
+    except Exception:
+        pass
+
     return f"Artifact created: {title} ({filename}) [id: {art['id']}]"
 
 
@@ -202,6 +275,12 @@ async def update_artifact(
         return f"Error: artifact '{artifact_id}' not found."
 
     _last_artifact = updated
+
+    try:
+        await _register_artifact_in_graph(updated, get_session_id(), get_user_id())
+    except Exception:
+        pass
+
     return (
         f"Artifact updated: {updated['title']} ({updated['filename']}) "
         f"[id: {artifact_id}, version: {updated['version']}]"

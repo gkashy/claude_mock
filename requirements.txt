@@ -11,3 +11,5 @@ ddgs>=7.0.0
 aiofiles>=24.1.0
 numpy>=1.26.0
 qdrant-client>=1.12.0
+networkx>=3.0
+graphify @ git+https://github.com/safishamsi/graphify.git@v3

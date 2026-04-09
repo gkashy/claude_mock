@@ -10,6 +10,8 @@ import logging
 import time
 from contextlib import asynccontextmanager
 
+import anthropic
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -37,6 +39,9 @@ async def lifespan(app: FastAPI):
     settings.DATA_DIR.mkdir(parents=True, exist_ok=True)
     await memory.init_db()
     await vector_store.ensure_collection()
+    await vector_store.ensure_entity_collection()
+    import knowledge_graph as kg
+    await kg.init_graph(user_id="default")
     yield
     await vector_store.close()
 
@@ -144,6 +149,140 @@ async def api_list_artifact_versions(artifact_id: str):
     return await memory.list_artifact_versions(artifact_id)
 
 
+@app.get("/api/artifacts/{artifact_id}/render")
+async def api_render_artifact(artifact_id: str, version: int | None = None):
+    """Render an artifact directly in the browser (HTML artifacts open natively)."""
+    from fastapi.responses import HTMLResponse, PlainTextResponse
+    art = await memory.get_artifact(artifact_id, version=version)
+    if not art:
+        return PlainTextResponse("Artifact not found", status_code=404)
+    if art["content_type"] == "html":
+        return HTMLResponse(content=art["content"])
+    return PlainTextResponse(content=art["content"])
+
+
+# ---------------------------------------------------------------------------
+# Knowledge graph REST endpoints
+# ---------------------------------------------------------------------------
+
+@app.get("/api/graph/stats")
+async def api_graph_stats(user_id: str = "default"):
+    """Basic graph statistics: node/edge counts, entity type breakdown, top entities."""
+    import knowledge_graph as kg
+    return kg.get_graph_stats(user_id=user_id)
+
+
+@app.get("/api/graph/entities")
+async def api_graph_entities(user_id: str = "default", entity_type: str | None = None):
+    """List all known entities for a user, optionally filtered by type."""
+    return await memory.list_entities(user_id=user_id, entity_type=entity_type)
+
+
+@app.get("/api/graph/neighbors/{entity_name}")
+async def api_graph_neighbors(entity_name: str, user_id: str = "default"):
+    """First-degree neighbors for a named entity."""
+    import knowledge_graph as kg
+    neighbors = kg.get_neighbors(entity_name, user_id=user_id)
+    return {"entity": entity_name, "neighbors": neighbors}
+
+
+@app.get("/api/graph/visualize")
+async def api_graph_visualize(user_id: str = "default"):
+    """Serve an interactive HTML graph visualization (via graphify)."""
+    from fastapi.responses import HTMLResponse
+    import knowledge_graph as kg
+    html = kg.export_html(user_id=user_id)
+    if not html:
+        return HTMLResponse(
+            content="<h2>No graph data yet. Start chatting to build your knowledge graph.</h2>",
+            status_code=200,
+        )
+    return HTMLResponse(content=html)
+
+
+@app.get("/api/graph/export")
+async def api_graph_export(user_id: str = "default"):
+    """Export the graph as node-link JSON (NetworkX format)."""
+    import knowledge_graph as kg
+    return kg.export_json(user_id=user_id)
+
+
+@app.post("/api/graph/rebuild")
+async def api_graph_rebuild(user_id: str = "default"):
+    """Force a full graph rebuild from Postgres (admin/debug)."""
+    import knowledge_graph as kg
+    await kg.init_graph(user_id=user_id)
+    stats = kg.get_graph_stats(user_id=user_id)
+    return {"rebuilt": True, **stats}
+
+
+@app.post("/api/graph/merge-duplicates")
+async def api_graph_merge_duplicates(user_id: str = "default"):
+    """Detect and merge duplicate person entities where one name is a prefix of another.
+
+    Example: 'Gaurav' and 'Gaurav Kashyap' -> keeps 'Gaurav Kashyap', re-points
+    all relationships from the shorter entity to the longer one, then deactivates
+    the shorter entity and rebuilds the in-memory graph.
+    """
+    from sqlalchemy import select, update as sa_update
+    from memory import (
+        Entity, Relationship, _async_session,
+    )
+    from datetime import datetime, timezone
+    import knowledge_graph as kg
+
+    merged: list[dict] = []
+
+    async with _async_session() as db:
+        result = await db.execute(
+            select(Entity).where(
+                Entity.user_id == user_id,
+                Entity.entity_type == "person",
+                Entity.active == True,
+            )
+        )
+        persons = result.scalars().all()
+
+        # Build list of (name_lower, entity) sorted longest first
+        sorted_persons = sorted(persons, key=lambda e: len(e.name_lower), reverse=True)
+
+        deactivated_ids: set[str] = set()
+
+        for i, longer in enumerate(sorted_persons):
+            if longer.id in deactivated_ids:
+                continue
+            for shorter in sorted_persons[i + 1:]:
+                if shorter.id in deactivated_ids:
+                    continue
+                sl = shorter.name_lower.strip()
+                ll = longer.name_lower.strip()
+                # Shorter must be a word-boundary prefix of longer
+                if ll.startswith(sl) and (len(ll) == len(sl) or ll[len(sl)] == " "):
+                    # Re-point all relationships from shorter -> longer
+                    await db.execute(
+                        sa_update(Relationship)
+                        .where(Relationship.source_entity_id == shorter.id)
+                        .values(source_entity_id=longer.id)
+                    )
+                    await db.execute(
+                        sa_update(Relationship)
+                        .where(Relationship.target_entity_id == shorter.id)
+                        .values(target_entity_id=longer.id)
+                    )
+                    # Deactivate the shorter/partial entity
+                    shorter.active = False
+                    shorter.last_seen = datetime.now(timezone.utc)
+                    deactivated_ids.add(shorter.id)
+                    merged.append({"removed": shorter.name, "kept": longer.name})
+
+        await db.commit()
+
+    # Rebuild in-memory graph to reflect the merge
+    await kg.init_graph(user_id=user_id)
+
+    return {"merged": merged, "merge_count": len(merged)}
+
+
 # ---------------------------------------------------------------------------
 # WebSocket chat
 # ---------------------------------------------------------------------------
@@ -235,6 +374,25 @@ async def ws_chat(ws: WebSocket, session_id: str):
         asyncio.create_task(
             _extract_if_worthwhile(session_id, user_id, reason="disconnect")
         )
+    except anthropic.APIStatusError as e:
+        await memory.save_messages(session_id, messages)
+        asyncio.create_task(
+            _extract_if_worthwhile(session_id, user_id, reason="error")
+        )
+        is_overloaded = (
+            e.status_code == 529
+            or "overloaded" in str(e).lower()
+        )
+        if is_overloaded:
+            log.warning("Anthropic overloaded for session %s (retries exhausted)", session_id)
+            msg = "Anthropic's servers are currently overloaded. Please wait a moment and try again."
+        else:
+            log.exception("Anthropic API error for session %s: %s", session_id, e)
+            msg = f"API error ({e.status_code}): {e.message}"
+        try:
+            await ws.send_json({"type": "error", "content": msg})
+        except Exception:
+            pass
     except Exception as e:
         log.exception("WebSocket error for session %s", session_id)
         await memory.save_messages(session_id, messages)

@@ -1,7 +1,10 @@
 """
 Qdrant vector store client for semantic memory.
 
-Manages the ``facts`` collection: upsert, search, and delete operations.
+Manages two collections:
+- ``facts``    -- fact sentence embeddings for semantic memory dedup/search
+- ``entities`` -- entity name embeddings for entity resolution candidate retrieval
+
 All vectors are 1536-dimension float32 arrays produced by OpenAI
 text-embedding-3-small.
 """
@@ -20,6 +23,7 @@ from embeddings import EMBEDDING_DIM
 log = logging.getLogger(__name__)
 
 COLLECTION_NAME = "facts"
+ENTITY_COLLECTION_NAME = "entities"
 
 
 def _to_qdrant_id(fact_id: str) -> str:
@@ -189,6 +193,81 @@ async def get_all_points(
             "vector": np.array(p.vector, dtype=np.float32) if p.vector else None,
         }
         for p in points
+    ]
+
+
+async def ensure_entity_collection() -> None:
+    """Create the entities collection if it doesn't exist."""
+    client = _get_client()
+    collections = await client.get_collections()
+    existing = [c.name for c in collections.collections]
+
+    if ENTITY_COLLECTION_NAME not in existing:
+        await client.create_collection(
+            collection_name=ENTITY_COLLECTION_NAME,
+            vectors_config=models.VectorParams(
+                size=EMBEDDING_DIM,
+                distance=models.Distance.COSINE,
+            ),
+        )
+        log.info("Created Qdrant collection '%s' (%d dims)", ENTITY_COLLECTION_NAME, EMBEDDING_DIM)
+    else:
+        log.info("Qdrant collection '%s' already exists", ENTITY_COLLECTION_NAME)
+
+
+async def upsert_entity_embedding(
+    entity_id: str,
+    embedding: np.ndarray,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    """Insert or update an entity name vector."""
+    client = _get_client()
+    point = models.PointStruct(
+        id=_to_qdrant_id(entity_id),
+        vector=embedding.tolist(),
+        payload={**(payload or {}), "_entity_id": entity_id},
+    )
+    await client.upsert(
+        collection_name=ENTITY_COLLECTION_NAME,
+        points=[point],
+    )
+
+
+async def search_entities(
+    query_embedding: np.ndarray,
+    user_id: str | None = None,
+    top_k: int = 5,
+) -> list[dict]:
+    """Search for similar entity names. Returns list of {id, name, score}."""
+    client = _get_client()
+
+    query_filter = None
+    if user_id:
+        query_filter = models.Filter(
+            must=[
+                models.FieldCondition(
+                    key="user_id",
+                    match=models.MatchValue(value=user_id),
+                )
+            ]
+        )
+
+    results = await client.query_points(
+        collection_name=ENTITY_COLLECTION_NAME,
+        query=query_embedding.tolist(),
+        query_filter=query_filter,
+        limit=top_k,
+        with_payload=True,
+    )
+
+    return [
+        {
+            "id": (point.payload or {}).get("_entity_id", str(point.id)),
+            "name": (point.payload or {}).get("name", ""),
+            "entity_type": (point.payload or {}).get("entity_type", ""),
+            "score": point.score,
+        }
+        for point in results.points
     ]
 
 

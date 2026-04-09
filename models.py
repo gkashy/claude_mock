@@ -6,6 +6,7 @@ which provider is active.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass, field
 from typing import AsyncIterator
@@ -175,7 +176,36 @@ class AnthropicProvider:
         self.client = anthropic.AsyncAnthropic(api_key=settings.ANTHROPIC_API_KEY)
         self.model = settings.ANTHROPIC_MODEL
 
+    _OVERLOAD_MAX_RETRIES = 3
+    _OVERLOAD_BASE_WAIT = 2  # seconds; doubles each attempt (2, 4, 8)
+
     async def stream(
+        self,
+        system: str,
+        messages: list[dict],
+        tools: list[dict] | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """Retry wrapper: silently retries on Anthropic overloaded errors."""
+        for attempt in range(self._OVERLOAD_MAX_RETRIES):
+            yielded_any = False
+            try:
+                async for event in self._do_stream(system, messages, tools):
+                    yielded_any = True
+                    yield event
+                return
+            except anthropic.APIStatusError as exc:
+                is_overloaded = (
+                    exc.status_code == 529
+                    or getattr(exc, "type", "") == "overloaded_error"
+                    or "overloaded" in str(exc).lower()
+                )
+                if is_overloaded and not yielded_any and attempt < self._OVERLOAD_MAX_RETRIES - 1:
+                    wait = self._OVERLOAD_BASE_WAIT * (2 ** attempt)
+                    await asyncio.sleep(wait)
+                    continue
+                raise
+
+    async def _do_stream(
         self,
         system: str,
         messages: list[dict],
